@@ -1,5 +1,6 @@
 import * as fsp from "fs/promises";
 import * as path from "path";
+import "./logger";
 
 // Cleanup function to remove files older than specified hours
 async function cleanupOldFiles(

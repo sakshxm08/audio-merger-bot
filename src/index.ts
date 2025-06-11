@@ -9,6 +9,8 @@ import tmp from "tmp-promise";
 import "dotenv/config";
 import { startPeriodicCleanup } from "./cleanup-service";
 
+import "./logger";
+
 // Type definitions
 interface AudioQueueItem {
   fileId: string;
