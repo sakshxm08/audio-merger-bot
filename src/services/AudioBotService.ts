@@ -190,31 +190,39 @@ export class AudioBotService {
 
       await ctx.reply("🔄 Merging audio files... Please wait...");
 
-      // Merge files with timeout protection
-      const mergePromise = this.audioMergeService.mergeAudios(
-        downloads.map((d) => d.path),
-        { threads: 1, bitrate: 192 }
-      );
+      // Add periodic progress updates for long operations
+      const progressInterval = setInterval(async () => {
+        try {
+          await ctx.reply(
+            "🔄 Still processing... Large files take time on our server."
+          );
+        } catch (e) {
+          // Ignore if user blocked bot or chat closed
+        }
+      }, 120000); // Every 2 minutes
 
-      // Set 8-minute timeout for merge operation
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(
-          () => reject(new Error("Merge operation timed out after 8 minutes")),
-          480000
+      try {
+        // Merge files without timeout - let FFmpeg finish naturally
+        const outputPath = await this.audioMergeService.mergeAudios(
+          downloads.map((d) => d.path),
+          { threads: 1, bitrate: 192 }
         );
-      });
 
-      const outputPath = await Promise.race([mergePromise, timeoutPromise]);
+        clearInterval(progressInterval);
 
-      await ctx.reply("📤 Uploading merged file...");
+        await ctx.reply("📤 Uploading merged file...");
 
-      // Send merged file
-      await ctx.replyWithAudio({
-        source: outputPath,
-        filename: `merged_${Date.now()}.mp3`,
-      });
+        // Send merged file
+        await ctx.replyWithAudio({
+          source: outputPath,
+          filename: `merged_${Date.now()}.mp3`,
+        });
 
-      await ctx.reply("✅ Audio files merged successfully!");
+        await ctx.reply("✅ Audio files merged successfully!");
+      } catch (error) {
+        clearInterval(progressInterval);
+        throw error;
+      }
     } finally {
       // Cleanup all downloaded files
       for (const download of downloads) {
