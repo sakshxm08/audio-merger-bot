@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node dist/index.js",
     "dev": "nodemon --exec ts-node src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "cleanup": "node dist/cleanup-service.js",
+    "cleanup-dev": "ts-node src/cleanup-service.ts"
   },
   "keywords": [],
   "author": "",

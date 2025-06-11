@@ -3,7 +3,7 @@ name: Deploy Audio Merger Bot
 on:
   push:
     branches:
-      - master
+      - main
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,11 @@ jobs:
 
       - name: Install dependencies and build
         run: |
-          npm ci
+          if [ -e package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
           npm run build
 
       - name: Setup Tailscale
@@ -38,33 +42,41 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY_AUDIO_BOT }}" > ~/.ssh/audio_bot_deploy_key
           chmod 600 ~/.ssh/audio_bot_deploy_key
 
-          # Add server's host key to known_hosts
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy to server
         run: |
-          # Transfer files first
+          # Ensure destination directory exists and has correct permissions
+          ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot &&
+            mkdir -p dist &&
+            chmod 755 dist
+          "
+
+          # Transfer built files
           scp -i ~/.ssh/audio_bot_deploy_key -r dist/* saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
+
+          # Transfer package.json
           scp -i ~/.ssh/audio_bot_deploy_key package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-          # Deploy with robust PM2 handling
+          # Update and restart
           ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             git pull origin main
             npm ci --production
             
-            # Check if process exists and handle accordingly
+            # Setup cron job for cleanup
+            (crontab -l 2>/dev/null | grep -v "audio-bot-cleanup"; echo "0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1") | crontab -
+            
             if pm2 describe audio-merger-bot > /dev/null 2>&1; then
-              echo "Process exists, restarting..."
               pm2 restart audio-merger-bot
             else
-              echo "Process doesn't exist, starting fresh..."
               pm2 start ecosystem.config.js
             fi
             
             pm2 save
-            echo "Audio merger bot deployment completed successfully!"
+            echo "Deployment completed successfully!"
           EOF
 
       - name: Verify deployment

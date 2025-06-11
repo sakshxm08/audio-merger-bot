@@ -7,6 +7,7 @@ import * as path from "path";
 import axios from "axios";
 import tmp from "tmp-promise";
 import "dotenv/config";
+import { startPeriodicCleanup } from "./cleanup-service";
 
 // Type definitions
 interface AudioQueueItem {
@@ -244,6 +245,9 @@ bot.on(message("voice"), async (ctx) => {
 bot.catch((err) => {
   console.error("Bot error:", err);
 });
+
+const telegramApiDirectory = "/var/lib/telegram-bot-api";
+startPeriodicCleanup(telegramApiDirectory, 24);
 
 // Launch bot
 bot.launch().then(() => {
