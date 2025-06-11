@@ -44,21 +44,25 @@ jobs:
 
       - name: Deploy to server
         run: |
-          # Stop the bot service
-          ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "pm2 stop audio-merger-bot"
-
-          # Transfer built files
+          # Transfer files first
           scp -i ~/.ssh/audio_bot_deploy_key -r dist/* saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
-
-          # Transfer package.json for dependencies
           scp -i ~/.ssh/audio_bot_deploy_key package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-          # Update code and restart bot
+          # Deploy with robust PM2 handling
           ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             git pull origin main
             npm ci --production
-            pm2 restart audio-merger-bot
+            
+            # Check if process exists and handle accordingly
+            if pm2 describe audio-merger-bot > /dev/null 2>&1; then
+              echo "Process exists, restarting..."
+              pm2 restart audio-merger-bot
+            else
+              echo "Process doesn't exist, starting fresh..."
+              pm2 start ecosystem.config.js
+            fi
+            
             pm2 save
             echo "Audio merger bot deployment completed successfully!"
           EOF
