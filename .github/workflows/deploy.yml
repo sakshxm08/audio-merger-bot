@@ -47,37 +47,17 @@ jobs:
 
       - name: Deploy to server
         run: |
-          # Ensure destination directory exists and has correct permissions
-          ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
-            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot &&
-            mkdir -p dist &&
-            chmod 755 dist
+          # Create directory structure
+          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+            mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot/dist
           "
 
-          # Transfer built files
-          scp -i ~/.ssh/audio_bot_deploy_key -r dist/* saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
+          # Use rsync instead of scp for better permission handling
+          rsync -avz --delete -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+            dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
-          # Transfer package.json
-          scp -i ~/.ssh/audio_bot_deploy_key package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
-
-          # Update and restart
-          ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            git pull origin master
-            npm ci --production
-            
-            # Setup cron job for cleanup
-            (crontab -l 2>/dev/null | grep -v "audio-bot-cleanup"; echo "0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1") | crontab -
-            
-            if pm2 describe audio-merger-bot > /dev/null 2>&1; then
-              pm2 restart audio-merger-bot
-            else
-              pm2 start ecosystem.config.js
-            fi
-            
-            pm2 save
-            echo "Deployment completed successfully!"
-          EOF
+          rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+            package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
       - name: Verify deployment
         run: |
