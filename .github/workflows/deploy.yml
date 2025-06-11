@@ -3,7 +3,7 @@ name: Deploy Audio Merger Bot
 on:
   push:
     branches:
-      - main
+      - master
   workflow_dispatch:
 
 jobs:
