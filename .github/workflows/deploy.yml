@@ -63,7 +63,7 @@ jobs:
           # Update and restart
           ssh -t -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            git pull origin main
+            git pull origin master
             npm ci --production
             
             # Setup cron job for cleanup
