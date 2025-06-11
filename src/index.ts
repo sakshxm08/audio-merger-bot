@@ -20,7 +20,7 @@ interface UserSession {
   audioFiles: AudioQueueItem[];
 }
 
-// Configure bot with Local Telegram Bot API Server
+// Configure bot with Local Telegram Bot API Server and increased timeout
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN!, {
   telegram: {
     apiRoot: process.env.LOCAL_TELEGRAM_API_ROOT || "http://127.0.0.1:8081",
@@ -33,10 +33,10 @@ const userSessions = new Map<number, UserSession>();
 tmp.setGracefulCleanup();
 
 // FFmpeg configuration
-ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH || "/opt/homebrew/bin/ffmpeg");
-ffmpeg.setFfprobePath(process.env.FFPROBE_PATH || "/opt/homebrew/bin/ffprobe");
+ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH || "/usr/bin/ffmpeg");
+ffmpeg.setFfprobePath(process.env.FFPROBE_PATH || "/usr/bin/ffprobe");
 
-// Helper: Download Telegram file (fixed for local Bot API server)
+// Helper: Download Telegram file with enhanced logging and timeout handling
 async function downloadFile(fileId: string, userId: number) {
   const fileLink = await bot.telegram.getFileLink(fileId);
   const url = fileLink.href;
@@ -57,7 +57,9 @@ async function downloadFile(fileId: string, userId: number) {
     // Check if file exists before copying
     try {
       await fsp.access(localPath);
+      console.log(`Copying file: ${localPath} to ${tempFile.path}`);
       await fsp.copyFile(localPath, tempFile.path);
+      console.log(`File copied successfully: ${tempFile.path}`);
     } catch (accessError) {
       throw new Error(`Local file not found: ${localPath}`);
     }
@@ -67,20 +69,25 @@ async function downloadFile(fileId: string, userId: number) {
       cleanup: tempFile.cleanup,
     };
   } else {
-    // Handle HTTP/HTTPS protocols (original logic)
+    // Handle HTTP/HTTPS protocols with timeout
     const extension = path.extname(url);
     const tempFile = await tmp.file({ postfix: extension });
 
+    console.log(`Downloading file from: ${url}`);
     const response = await axios({
       url: url,
       method: "GET",
       responseType: "stream",
+      timeout: 300000, // 5 minutes timeout for downloads
     });
 
     await new Promise((resolve, reject) => {
       response.data
         .pipe(fs.createWriteStream(tempFile.path))
-        .on("finish", resolve)
+        .on("finish", () => {
+          console.log(`Download completed: ${tempFile.path}`);
+          resolve(undefined);
+        })
         .on("error", reject);
     });
 
@@ -91,16 +98,43 @@ async function downloadFile(fileId: string, userId: number) {
   }
 }
 
-// Helper: Merge audio files
+// Helper: Merge audio files with performance optimization and progress tracking
 async function mergeAudios(files: string[], outputPath: string) {
   return new Promise((resolve, reject) => {
+    console.log(`Starting merge of ${files.length} files`);
     const command = ffmpeg();
 
-    files.forEach((file) => command.input(file));
+    files.forEach((file, index) => {
+      console.log(`Adding input file ${index + 1}: ${file}`);
+      command.input(file);
+    });
 
     command
-      .on("end", resolve)
-      .on("error", reject)
+      .audioCodec("mp3")
+      .audioBitrate(192) // Good quality for merged output
+      .audioChannels(2)
+      .outputOptions([
+        "-threads 1", // Limit CPU threads for 1GB server
+        "-preset fast", // Balance speed vs quality
+        "-avoid_negative_ts make_zero",
+        "-max_muxing_queue_size 1024",
+      ])
+      .on("start", (commandLine) => {
+        console.log("FFmpeg started with command:", commandLine);
+      })
+      .on("progress", (progress) => {
+        console.log(
+          `Processing: ${progress.percent}% done, time: ${progress.timemark}`
+        );
+      })
+      .on("end", () => {
+        console.log("FFmpeg merge completed successfully");
+        resolve(undefined);
+      })
+      .on("error", (error) => {
+        console.error("FFmpeg error:", error);
+        reject(error);
+      })
       .mergeToFile(outputPath, tmp.dirSync().name);
   });
 }
@@ -133,7 +167,7 @@ bot.on(message("audio"), async (ctx) => {
   );
 });
 
-// Merge command
+// Enhanced merge command with timeout handling and user feedback
 bot.command("merge", async (ctx) => {
   const userId = ctx.from.id;
   const session = userSessions.get(userId);
@@ -146,23 +180,47 @@ bot.command("merge", async (ctx) => {
     return ctx.reply("❌ Need at least 2 audio files to merge.");
   }
 
-  const processingMsg = await ctx.reply("⏳ Processing...");
+  const processingMsg = await ctx.reply(
+    "⏳ Processing large files... This may take several minutes."
+  );
 
   try {
-    // Download all files
+    // Download all files with progress updates
+    console.log(
+      `Starting download of ${session.audioFiles.length} files for user ${userId}`
+    );
     const downloads = await Promise.all(
-      session.audioFiles.map(async (file) => {
+      session.audioFiles.map(async (file, index) => {
+        await ctx.reply(
+          `📥 Downloading file ${index + 1}/${session.audioFiles.length}...`
+        );
         const { path, cleanup } = await downloadFile(file.fileId, userId);
         return { path, cleanup };
       })
     );
 
-    // Merge files
+    await ctx.reply("🔄 Merging audio files... Please wait...");
+
+    // Merge files with timeout protection
     const outputFile = await tmp.file({ postfix: ".mp3" });
-    await mergeAudios(
+
+    // Add timeout wrapper for merge operation
+    const mergePromise = mergeAudios(
       downloads.map((d) => d.path),
       outputFile.path
     );
+
+    // Set 8-minute timeout for merge operation
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(
+        () => reject(new Error("Merge operation timed out after 8 minutes")),
+        480000
+      );
+    });
+
+    await Promise.race([mergePromise, timeoutPromise]);
+
+    await ctx.reply("📤 Uploading merged file...");
 
     // Send merged file
     await ctx.replyWithAudio({
@@ -176,14 +234,20 @@ bot.command("merge", async (ctx) => {
     downloads.forEach((d) => d.cleanup());
     await outputFile.cleanup();
     userSessions.delete(userId);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Merge error:", error);
-    await ctx.reply("❌ Error processing audio files. Please try again.");
-  } finally {
-    try {
-      await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id);
-    } catch (deleteError) {
-      // Ignore deletion errors (message might already be deleted)
+    if (error instanceof Error) {
+      if (error.message.includes("timed out")) {
+        await ctx.reply(
+          "❌ Processing timed out. Files may be too large for current server capacity. Try with smaller files."
+        );
+      } else {
+        await ctx.reply(
+          "❌ Error processing audio files. Please try again with smaller files."
+        );
+      }
+    } else {
+      await ctx.reply("❌ An unexpected error occurred. Please try again.");
     }
   }
 });
@@ -246,6 +310,7 @@ bot.catch((err) => {
   console.error("Bot error:", err);
 });
 
+// Start periodic cleanup for Telegram Bot API files
 const telegramApiDirectory = "/var/lib/telegram-bot-api";
 startPeriodicCleanup(telegramApiDirectory, 24);
 
