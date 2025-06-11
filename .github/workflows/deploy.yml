@@ -66,7 +66,7 @@ jobs:
           ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
             sudo pkill -f 'PM2.*God Daemon' || true &&
             sudo rm -rf /root/.pm2 || true &&
-            pgrep -f 'node.*audio-merger-bot/dist' | xargs -r kill || true &&
+            sudo pkill -f '[n]ode.*audio-merger-bot' || true &&
             pm2 delete audio-merger-bot 2>/dev/null || true &&
             sleep 5
           "
