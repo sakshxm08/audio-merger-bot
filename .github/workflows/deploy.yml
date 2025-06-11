@@ -41,24 +41,56 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY_AUDIO_BOT }}" > ~/.ssh/audio_bot_deploy_key
           chmod 600 ~/.ssh/audio_bot_deploy_key
-
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy to server
+      - name: Deploy files to server
         run: |
           # Create directory structure
           ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
             mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot/dist
           "
 
-          # Use rsync instead of scp for better permission handling
+          # Use rsync for reliable file transfer
           rsync -avz --delete -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
           rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
             package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
+          rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+            ecosystem.config.js saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
+
+      - name: Update dependencies and restart PM2
+        run: |
+          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            # Update code from git
+            git pull origin master
+            
+            # Install production dependencies
+            npm ci --production
+            
+            # Setup cron job for cleanup (only if not exists)
+            (crontab -l 2>/dev/null | grep -q "audio-bot-cleanup") || \
+            (crontab -l 2>/dev/null; echo "0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1") | crontab -
+            
+            # Clean PM2 restart to prevent multiple instances
+            pm2 delete audio-merger-bot 2>/dev/null || true
+            sleep 3
+            pm2 start ecosystem.config.js
+            pm2 save
+            
+            echo "Clean deployment completed successfully!"
+          EOF
+
       - name: Verify deployment
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "pm2 status audio-merger-bot"
+          # Wait for process to fully start
+          sleep 5
+          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+            pm2 status audio-merger-bot &&
+            echo 'Bot status:' &&
+            pm2 logs audio-merger-bot --lines 5 --nostream
+          "
