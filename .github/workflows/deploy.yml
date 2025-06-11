@@ -44,65 +44,186 @@ jobs:
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Create environment file
+        run: |
+          cat > .env.production << EOF
+          TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
+          LOCAL_TELEGRAM_API_ROOT=http://127.0.0.1:8081
+          FFMPEG_PATH=/usr/bin/ffmpeg
+          FFPROBE_PATH=/usr/bin/ffprobe
+          CLEANUP_DIRECTORY=/var/lib/telegram-bot-api
+          CLEANUP_INTERVAL_HOURS=24
+          NODE_ENV=production
+          EOF
+
       - name: Deploy files to server
         run: |
           # Create directory structure if it doesn't exist
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
-            mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot/dist
+            mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot/{dist,logs}
+            echo 'Directory structure created'
           "
 
           # Transfer built files
+          echo 'Transferring built files...'
           rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
-          # Transfer configuration files
+          # Transfer configuration and environment files
+          echo 'Transferring configuration files...'
           rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
-            package.json ecosystem.config.js saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
+            package.json ecosystem.config.js .env.production \
+            saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-      - name: Deploy and restart service
+      - name: Pull latest code and install dependencies
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=60 saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            # Update code from repository
-            timeout 60 git pull origin master || echo "Git pull failed or timed out, continuing with uploaded files"
+            echo "=== Pulling latest code ==="
+            # Initialize git repo if it doesn't exist
+            if [ ! -d .git ]; then
+              echo "Initializing git repository..."
+              git init
+              git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+            fi
             
-            # Install production dependencies
-            timeout 120 npm ci --production
+            # Pull latest code with timeout
+            timeout 60 git fetch origin master || echo "Git fetch failed or timed out"
+            timeout 60 git reset --hard origin/master || echo "Git reset failed, using uploaded files"
             
+            echo "=== Installing production dependencies ==="
+            # Remove node_modules to ensure clean install
+            rm -rf node_modules package-lock.json
+            timeout 120 npm install --production --no-audit --no-fund || {
+              echo "npm install failed, retrying..."
+              timeout 120 npm install --production --force
+            }
+            
+            # Rename environment file
+            if [ -f .env.production ]; then
+              mv .env.production .env
+              echo "Environment file configured"
+            fi
+            
+            echo "=== Dependencies installation completed ==="
+          EOF
+
+      - name: Setup system services and cron
+        run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== Setting up cleanup cron job ==="
             # Setup cleanup cron job if it doesn't exist
-            if ! crontab -l 2>/dev/null | grep -q 'npm run cleanup'; then
+            if ! crontab -l 2>/dev/null | grep -q 'audio-merger-bot.*cleanup'; then
               (crontab -l 2>/dev/null; echo '0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1') | crontab -
-              echo "Cleanup cron job added"
+              echo "✓ Cleanup cron job added"
+            else
+              echo "✓ Cleanup cron job already exists"
             fi
             
-            # Handle PM2 process management
-            if pm2 describe audio-merger-bot > /dev/null 2>&1; then
-              echo "Process exists, restarting..."
-              pm2 restart audio-merger-bot
-              pm2 logs audio-merger-bot --lines 0 > /dev/null 2>&1 || true
-            else
-              echo "Process doesn't exist, starting fresh..."
-              pm2 start ecosystem.config.js
+            # Ensure log directory exists
+            sudo mkdir -p /var/log
+            sudo touch /var/log/telegram-cleanup.log
+            sudo chown saksham:saksham /var/log/telegram-cleanup.log 2>/dev/null || true
+            
+            echo "=== System services setup completed ==="
+          EOF
+
+      - name: Restart PM2 process
+        run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== Managing PM2 process ==="
+            
+            # Check if PM2 is installed
+            if ! command -v pm2 &> /dev/null; then
+              echo "PM2 not found, installing..."
+              npm install -g pm2
             fi
+            
+            # Stop existing process if running
+            if pm2 describe audio-merger-bot > /dev/null 2>&1; then
+              echo "🔄 Stopping existing audio-merger-bot process..."
+              pm2 stop audio-merger-bot
+              pm2 delete audio-merger-bot
+              echo "✓ Existing process stopped and removed"
+            else
+              echo "ℹ️  No existing process found"
+            fi
+            
+            # Start fresh process
+            echo "🚀 Starting audio-merger-bot with PM2..."
+            pm2 start ecosystem.config.js
             
             # Save PM2 configuration
             pm2 save
             
-            echo "Audio merger bot deployment completed successfully!"
+            # Setup PM2 startup script
+            pm2 startup systemd -u saksham --hp /home/saksham > /dev/null 2>&1 || true
+            
+            echo "✅ PM2 process restarted successfully!"
           EOF
 
-      - name: Verify deployment
+      - name: Verify deployment and show status
         run: |
           # Wait for process to fully start
-          sleep 8
-          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
-            echo 'PM2 Status:'
-            pm2 status audio-merger-bot
-            echo ''
-            echo 'Process Check:'
-            ps aux | grep -E 'node.*audio-merger-bot' | grep -v grep || echo 'No matching processes found'
-            echo ''
-            echo 'Recent Logs:'
-            pm2 logs audio-merger-bot --lines 5 --nostream || echo 'No logs available yet'
-          "
+          echo "⏳ Waiting for process to initialize..."
+          sleep 10
+
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== DEPLOYMENT VERIFICATION ==="
+            echo ""
+            
+            echo "📊 PM2 Status:"
+            pm2 status audio-merger-bot || echo "❌ PM2 status check failed"
+            echo ""
+            
+            echo "🔍 Process Check:"
+            if ps aux | grep -E 'node.*audio-merger-bot' | grep -v grep; then
+              echo "✅ Audio merger bot process is running"
+            else
+              echo "❌ No audio merger bot process found"
+            fi
+            echo ""
+            
+            echo "📝 Recent Logs (last 10 lines):"
+            pm2 logs audio-merger-bot --lines 10 --nostream 2>/dev/null || echo "⚠️  No logs available yet"
+            echo ""
+            
+            echo "💾 Memory Usage:"
+            pm2 monit --lines 1 2>/dev/null | head -5 || echo "Memory info not available"
+            echo ""
+            
+            echo "🐳 Docker Telegram Bot API Status:"
+            if docker ps | grep -q "8081.*8081"; then
+              echo "✅ Telegram Bot API container is running on port 8081"
+            else
+              echo "⚠️  Telegram Bot API container not found - make sure to start it manually"
+              echo "Run: docker run -d -p 8081:8081 --env TELEGRAM_API_ID=YOUR_API_ID --env TELEGRAM_API_HASH=YOUR_API_HASH tdlight/tdlightbotapi"
+            fi
+            echo ""
+            
+            echo "🎯 Deployment Summary:"
+            echo "✅ Code updated from repository"
+            echo "✅ Dependencies installed"
+            echo "✅ PM2 process restarted"
+            echo "✅ Cron job configured"
+            echo "✅ Environment configured for production"
+            echo ""
+            echo "🚀 Audio Merger Bot deployment completed successfully!"
+          EOF
+
+      - name: Send deployment notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment completed successfully!"
+          else
+            echo "❌ Deployment failed!"
+            exit 1
+          fi

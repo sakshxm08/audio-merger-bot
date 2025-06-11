@@ -1,6 +1,19 @@
 import * as fsp from "fs/promises";
 import * as path from "path";
-import "./logger";
+import { Logger } from "./utils/logger";
+
+const logger = new Logger("CleanupService");
+
+// Ensure directory exists
+async function ensureDirectoryExists(directory: string): Promise<void> {
+  try {
+    await fsp.access(directory);
+  } catch (error) {
+    // Directory doesn't exist, create it
+    await fsp.mkdir(directory, { recursive: true });
+    logger.log(`Created directory: ${directory}`);
+  }
+}
 
 // Cleanup function to remove files older than specified hours
 async function cleanupOldFiles(
@@ -8,6 +21,9 @@ async function cleanupOldFiles(
   hoursOld: number = 24
 ): Promise<number> {
   try {
+    // Ensure directory exists before attempting cleanup
+    await ensureDirectoryExists(directory);
+
     const threshold = Date.now() - hoursOld * 60 * 60 * 1000;
     let removedCount = 0;
 
@@ -24,22 +40,22 @@ async function cleanupOldFiles(
               if (stats.mtime.getTime() < threshold) {
                 await fsp.unlink(fullPath);
                 removedCount++;
-                console.log(`Removed old file: ${fullPath}`);
+                logger.log(`Removed old file: ${fullPath}`);
               }
             } catch (error) {
-              console.error(`Failed to process file ${fullPath}:`, error);
+              logger.error(`Failed to process file ${fullPath}:`, error);
             }
           }
         }
       } catch (error) {
-        console.error(`Failed to read directory ${dir}:`, error);
+        logger.error(`Failed to read directory ${dir}:`, error);
       }
     }
 
     await walkDirectory(directory);
     return removedCount;
   } catch (error) {
-    console.error(`Cleanup failed for directory ${directory}:`, error);
+    logger.error(`Cleanup failed for directory ${directory}:`, error);
     return 0;
   }
 }
@@ -53,7 +69,7 @@ async function startPeriodicCleanup(
 
   // Run cleanup immediately on startup
   const removedCount = await cleanupOldFiles(directory, intervalHours);
-  console.log(
+  logger.log(
     `Initial cleanup: Removed ${removedCount} old files from ${directory}`
   );
 
@@ -62,20 +78,20 @@ async function startPeriodicCleanup(
     try {
       const removedCount = await cleanupOldFiles(directory, intervalHours);
       if (removedCount > 0) {
-        console.log(
+        logger.log(
           `Periodic cleanup: Removed ${removedCount} old files from ${directory}`
         );
       } else {
-        console.log(
+        logger.log(
           `Periodic cleanup: No files older than ${intervalHours} hours found in ${directory}`
         );
       }
     } catch (error) {
-      console.error("Periodic cleanup error:", error);
+      logger.error("Periodic cleanup error:", error);
     }
   }, intervalMs);
 
-  console.log(
+  logger.log(
     `Periodic cleanup started for ${directory} (every ${intervalHours} hours)`
   );
 }
@@ -83,11 +99,14 @@ async function startPeriodicCleanup(
 // Run the cleanup service if this file is executed directly
 if (require.main === module) {
   const directory =
-    process.env.CLEANUP_DIRECTORY || "/var/lib/telegram-bot-api";
+    process.env.CLEANUP_DIRECTORY ||
+    (process.env.NODE_ENV === "development"
+      ? "../telegram-bot-api"
+      : "/var/lib/telegram-bot-api");
   const intervalHours = Number(process.env.CLEANUP_INTERVAL_HOURS) || 24;
 
   startPeriodicCleanup(directory, intervalHours).catch((error) => {
-    console.error("Cleanup service failed:", error);
+    logger.error("Cleanup service failed:", error);
     process.exit(1);
   });
 }
