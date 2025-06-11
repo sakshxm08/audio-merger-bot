@@ -61,26 +61,38 @@ jobs:
           rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
             ecosystem.config.js saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-      - name: Update dependencies and restart PM2
+      - name: Clean deployment and restart PM2
         run: |
           ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            # Update code from git
-            git pull origin master
+            # Complete cleanup to prevent 409 conflicts
+            sudo pkill -f "PM2.*God Daemon" || true
+            sudo rm -rf /root/.pm2 || true
+            sudo pkill -f "node.*audio-merger-bot" || true
+            pm2 delete audio-merger-bot 2>/dev/null || true
+            sleep 5
             
-            # Install production dependencies
+            # Clear PM2 logs for clean startup
+            rm -f ~/.pm2/logs/audio-merger-bot-*.log
+            rm -f logs/out-0.log logs/err-0.log
+            
+            # Update code and dependencies
+            git pull origin master
             npm ci --production
             
-            # Setup cron job for cleanup (only if not exists)
-            (crontab -l 2>/dev/null | grep -q "audio-bot-cleanup") || \
-            (crontab -l 2>/dev/null; echo "0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1") | crontab -
+            # Setup cron job ONLY if it doesn't exist (prevent duplicates)
+            if ! crontab -l 2>/dev/null | grep -q "npm run cleanup"; then
+              (crontab -l 2>/dev/null; echo "0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1") | crontab -
+            fi
             
-            # Clean PM2 restart to prevent multiple instances
-            pm2 delete audio-merger-bot 2>/dev/null || true
-            sleep 3
+            # Start fresh PM2 instance as saksham user
             pm2 start ecosystem.config.js
             pm2 save
+            
+            # Final verification - ensure no conflicting processes
+            sleep 3
+            sudo pkill -f "node.*audio-merger-bot" -u root || true
             
             echo "Clean deployment completed successfully!"
           EOF
@@ -88,9 +100,14 @@ jobs:
       - name: Verify deployment
         run: |
           # Wait for process to fully start
-          sleep 5
+          sleep 8
           ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+            echo 'PM2 Status:' &&
             pm2 status audio-merger-bot &&
-            echo 'Bot status:' &&
+            echo '' &&
+            echo 'Process Check:' &&
+            ps aux | grep -E 'node.*audio-merger-bot' | grep -v grep &&
+            echo '' &&
+            echo 'Recent Logs:' &&
             pm2 logs audio-merger-bot --lines 5 --nostream
           "
