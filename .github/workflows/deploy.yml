@@ -39,41 +39,41 @@ jobs:
       - name: Configure SSH key and known hosts
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY_AUDIO_BOT }}" > ~/.ssh/audio_bot_deploy_key
-          chmod 600 ~/.ssh/audio_bot_deploy_key
+          echo "${{ secrets.SSH_PRIVATE_KEY_AUDIO_BOT }}" > ~/.ssh/github-audio-bot-deploy
+          chmod 600 ~/.ssh/github-audio-bot-deploy
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy files to server
         run: |
           # Create directory structure
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
             mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot/dist
           "
 
           # Use rsync for reliable file transfer
-          rsync -avz --delete -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+          rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
-          rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+          rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             package.json saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-          rsync -avz -e "ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no" \
+          rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             ecosystem.config.js saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
       - name: Cleanup processes
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
             sudo pkill -f 'PM2.*God Daemon' || true &&
             sudo rm -rf /root/.pm2 || true &&
-            sudo pkill -f '[n]ode.*audio-merger-bot' || true &&
+            pgrep -f 'audio-merger-bot/dist' | xargs -r sudo kill || true &&
             pm2 delete audio-merger-bot 2>/dev/null || true &&
             sleep 5
           "
 
       - name: Clear logs
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot &&
             rm -f ~/.pm2/logs/audio-merger-bot-*.log || true &&
             rm -f logs/out-0.log logs/err-0.log || true
@@ -81,7 +81,7 @@ jobs:
 
       - name: Update code and dependencies
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=120 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=120 saksham@${{ secrets.DEPLOY_HOST }} "
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot &&
             timeout 60 git pull origin master &&
             timeout 120 npm ci --production
@@ -89,7 +89,7 @@ jobs:
 
       - name: Setup cron job
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
             if ! crontab -l 2>/dev/null | grep -q 'npm run cleanup'; then
               (crontab -l 2>/dev/null; echo '0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1') | crontab -
             fi
@@ -97,7 +97,7 @@ jobs:
 
       - name: Start PM2
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=60 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=60 saksham@${{ secrets.DEPLOY_HOST }} "
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot &&
             pm2 start ecosystem.config.js &&
             pm2 save
@@ -105,9 +105,9 @@ jobs:
 
       - name: Final cleanup
         run: |
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=30 saksham@${{ secrets.DEPLOY_HOST }} "
             sleep 3 &&
-            sudo pkill -f 'node.*audio-merger-bot' -u root || true &&
+            pgrep -f 'audio-merger-bot/dist' -u root | xargs -r sudo kill || true &&
             echo 'Clean deployment completed successfully!'
           "
 
@@ -115,7 +115,7 @@ jobs:
         run: |
           # Wait for process to fully start
           sleep 8
-          ssh -i ~/.ssh/audio_bot_deploy_key -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} "
             echo 'PM2 Status:' &&
             pm2 status audio-merger-bot &&
             echo '' &&
