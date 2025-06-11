@@ -56,12 +56,12 @@ jobs:
           NODE_ENV=production
           EOF
 
-      - name: Fix server permissions and prepare deployment
+      - name: Stop services and prepare for deployment
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            echo "=== Fixing permissions and preparing deployment ==="
+            echo "=== Stopping services and preparing for deployment ==="
             
-            # Stop PM2 process first to release file locks
+            # Stop PM2 process first
             if pm2 describe audio-merger-bot > /dev/null 2>&1; then
               echo "Stopping PM2 process..."
               pm2 stop audio-merger-bot || true
@@ -71,50 +71,81 @@ jobs:
             # Navigate to project directory
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot || exit 1
             
-            # Fix git repository permissions
-            echo "Fixing git repository permissions..."
-            sudo chown -R saksham:saksham .git/ 2>/dev/null || true
-            chmod -R u+w .git/ 2>/dev/null || true
-            
-            # Completely remove node_modules with force
-            echo "Removing node_modules with proper permissions..."
-            sudo rm -rf node_modules/ 2>/dev/null || true
-            rm -rf package-lock.json 2>/dev/null || true
-            
-            # Fix directory ownership
-            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/ 2>/dev/null || true
-            
-            # Create necessary directories
-            mkdir -p logs dist
-            
-            echo "✓ Permissions fixed and environment prepared"
+            echo "✓ Services stopped and ready for deployment"
           EOF
 
-      - name: Deploy files to server
+      - name: Pull latest code from repository
         run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== Pulling latest code ==="
+            
+            # Fix ownership first
+            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
+            
+            # Get current commit for comparison
+            CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+            echo "Current commit: $CURRENT_COMMIT"
+            
+            # Pull as the saksham user (not root)
+            git pull origin master
+            
+            # Verify the update
+            NEW_COMMIT=$(git rev-parse HEAD)
+            echo "New commit: $NEW_COMMIT"
+            
+            if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ]; then
+              echo "✅ Code updated successfully from $CURRENT_COMMIT to $NEW_COMMIT"
+            else
+              echo "ℹ️  Code was already up to date"
+            fi
+            
+            # Show current file structure
+            echo "Current file structure:"
+            ls -la src/ 2>/dev/null || echo "src directory not found"
+          EOF
+
+      - name: Deploy built files and configurations
+        run: |
+          echo 'Transferring built files and configurations...'
+
+          # Transfer all source files (to ensure complete modular structure)
+          rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
+            src/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/src/
+
           # Transfer built files
-          echo 'Transferring built files...'
           rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
-          # Transfer configuration and environment files
-          echo 'Transferring configuration files...'
+          # Transfer configuration files
           rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
-            package.json ecosystem.config.js .env.production \
+            package.json ecosystem.config.js .env.production tsconfig.json \
             saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-      - name: Install dependencies and configure environment
+      - name: Fix permissions and install dependencies
         run: |
-          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no -o ConnectTimeout=60 saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            echo "=== Installing production dependencies ==="
-            # Clean install without removing existing files
-            npm install --production --no-audit --no-fund --force || {
-              echo "First install failed, trying alternative approach..."
+            echo "=== Fixing permissions ==="
+            # Fix ownership and permissions
+            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
+            chmod -R 755 /home/saksham/Desktop/telegram-bots/audio-merger-bot/
+            
+            # Clean old installations
+            sudo rm -rf node_modules package-lock.json 2>/dev/null || true
+            
+            echo "=== Installing dependencies ==="
+            # Install with sudo to avoid permission issues
+            sudo npm install --production --no-audit --no-fund --unsafe-perm --allow-root || {
+              echo "Sudo install failed, trying alternative..."
               npm cache clean --force
               npm install --production --no-audit --no-fund --legacy-peer-deps
             }
+            
+            # Fix ownership after installation
+            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
             
             # Configure environment
             if [ -f .env.production ]; then
@@ -122,61 +153,26 @@ jobs:
               echo "✓ Environment file configured"
             fi
             
-            # Fix any remaining permission issues
-            chmod -R u+w . 2>/dev/null || true
+            echo "=== Verifying new file structure ==="
+            echo "Source files:"
+            find src/ -name "*.ts" | head -10
+            echo "Built files:"
+            find dist/ -name "*.js" | head -10
             
-            echo "=== Dependencies installation completed ==="
+            echo "✅ Dependencies and structure updated"
           EOF
 
-      - name: Setup system services
+      - name: Start PM2 process
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            
-            echo "=== Setting up system services ==="
-            
-            # Setup cleanup cron job
-            if ! crontab -l 2>/dev/null | grep -q 'audio-merger-bot.*cleanup'; then
-              (crontab -l 2>/dev/null; echo '0 2 * * * cd /home/saksham/Desktop/telegram-bots/audio-merger-bot && npm run cleanup >> /var/log/telegram-cleanup.log 2>&1') | crontab -
-              echo "✓ Cleanup cron job added"
-            else
-              echo "✓ Cleanup cron job already exists"
-            fi
-            
-            # Create log directory (without sudo to avoid permission issues)
-            touch ./telegram-cleanup.log 2>/dev/null || true
-            
-            echo "=== System services setup completed ==="
-          EOF
-
-      - name: Check FFmpeg and start PM2 process
-        run: |
-          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            
-            echo "=== Checking FFmpeg installation ==="
-            
-            # Check FFmpeg installation and codecs
-            if command -v ffmpeg >/dev/null 2>&1; then
-              echo "✓ FFmpeg found at: $(which ffmpeg)"
-              echo "Checking MP3 codec support..."
-              if ffmpeg -codecs 2>/dev/null | grep -q "libmp3lame"; then
-                echo "✓ libmp3lame codec available"
-              else
-                echo "⚠️  libmp3lame codec not found - installing..."
-                sudo apt update && sudo apt install -y ffmpeg || echo "FFmpeg installation failed"
-              fi
-            else
-              echo "❌ FFmpeg not found - installing..."
-              sudo apt update && sudo apt install -y ffmpeg || echo "FFmpeg installation failed"
-            fi
             
             echo "=== Starting PM2 process ==="
             
             # Ensure PM2 is available
             if ! command -v pm2 &> /dev/null; then
               echo "Installing PM2..."
-              npm install -g pm2 || sudo npm install -g pm2
+              sudo npm install -g pm2
             fi
             
             # Start fresh PM2 process
@@ -189,7 +185,7 @@ jobs:
             echo "✅ PM2 process started successfully!"
           EOF
 
-      - name: Verify deployment and show status
+      - name: Verify deployment
         run: |
           echo "⏳ Waiting for process to initialize..."
           sleep 15
@@ -201,59 +197,25 @@ jobs:
             echo ""
             
             echo "📊 PM2 Status:"
-            pm2 status audio-merger-bot || echo "❌ PM2 status check failed"
+            pm2 status audio-merger-bot
             echo ""
             
-            echo "🔍 Process Check:"
-            if ps aux | grep -E 'node.*audio-merger-bot' | grep -v grep; then
-              echo "✅ Audio merger bot process is running"
-            else
-              echo "❌ No audio merger bot process found"
-            fi
+            echo "🔍 Git Status:"
+            echo "Current commit: $(git rev-parse HEAD)"
+            echo "Current branch: $(git branch --show-current)"
             echo ""
             
-            echo "📝 Recent Logs (last 15 lines):"
-            pm2 logs audio-merger-bot --lines 15 --nostream 2>/dev/null || echo "⚠️  No logs available yet"
+            echo "📁 File Structure Verification:"
+            echo "Source structure:"
+            ls -la src/
+            echo ""
+            echo "Services directory:"
+            ls -la src/services/ 2>/dev/null || echo "Services directory not found"
             echo ""
             
-            echo "🎵 FFmpeg Codec Check:"
-            if ffmpeg -codecs 2>/dev/null | grep -q "libmp3lame"; then
-              echo "✅ MP3 encoding support available"
-            else
-              echo "❌ MP3 encoding support missing"
-            fi
+            echo "📝 Recent Logs:"
+            pm2 logs audio-merger-bot --lines 10 --nostream 2>/dev/null || echo "No logs available yet"
             echo ""
             
-            echo "🐳 Docker Telegram Bot API Status:"
-            if command -v docker >/dev/null 2>&1; then
-              if docker ps 2>/dev/null | grep -q "8081.*8081"; then
-                echo "✅ Telegram Bot API container is running on port 8081"
-              else
-                echo "⚠️  Telegram Bot API container not found"
-                echo "Start with: docker run -d -p 8081:8081 --env TELEGRAM_API_ID=YOUR_API_ID --env TELEGRAM_API_HASH=YOUR_API_HASH tdlight/tdlightbotapi"
-              fi
-            else
-              echo "ℹ️  Docker not accessible or not installed"
-            fi
-            echo ""
-            
-            echo "🎯 Deployment Summary:"
-            echo "✅ Permissions fixed"
-            echo "✅ Code deployed"
-            echo "✅ Dependencies installed"
-            echo "✅ PM2 process started"
-            echo "✅ Cron job configured"
-            echo "✅ Environment configured for production"
-            echo ""
-            echo "🚀 Audio Merger Bot deployment completed!"
+            echo "🚀 Deployment completed!"
           EOF
-
-      - name: Send deployment notification
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Deployment completed successfully!"
-          else
-            echo "❌ Deployment failed!"
-            exit 1
-          fi
