@@ -34,27 +34,50 @@ export class FileDownloadService {
   }
 
   private async handleLocalFile(url: string): Promise<DownloadResult> {
+    // Add this debug logging
+    this.logger.log(`Raw URL received: ${url}`);
+
     let localPath: string;
 
     if (url.startsWith("file://")) {
       localPath = url.replace("file://", "");
     } else if (url.startsWith("http")) {
       // Extract file path from local API URL
-      // URL format: http://telegram-bot-api:8081/file/bot<token>/<file_path>
       const urlParts = url.split("/file/");
       if (urlParts.length > 1) {
         const filePathPart = urlParts[1];
+        this.logger.log(`File path part extracted: ${filePathPart}`);
+
         // Remove bot token prefix: bot<token>/<actual_path> -> <actual_path>
         const pathAfterToken = filePathPart.substring(
           filePathPart.indexOf("/") + 1
         );
+        this.logger.log(`Path after token: ${pathAfterToken}`);
+
         localPath = path.join("/var/lib/telegram-bot-api", pathAfterToken);
       } else {
         throw new Error(`Invalid local API URL format: ${url}`);
       }
     } else {
-      // Direct file path - join with base directory
-      localPath = path.join("/var/lib/telegram-bot-api", url);
+      // Direct file path - this is likely where the issue is
+      this.logger.log(`Direct file path detected: ${url}`);
+
+      // Remove any 'telegram-bot-api/' prefix if it exists
+      let cleanUrl = url;
+      if (cleanUrl.startsWith("telegram-bot-api/")) {
+        cleanUrl = cleanUrl.replace("telegram-bot-api/", "");
+        this.logger.log(`Cleaned URL after removing prefix: ${cleanUrl}`);
+      }
+
+      // Also handle if it starts with '/telegram-bot-api/'
+      if (cleanUrl.startsWith("/telegram-bot-api/")) {
+        cleanUrl = cleanUrl.replace("/telegram-bot-api/", "");
+        this.logger.log(
+          `Cleaned URL after removing /telegram-bot-api/ prefix: ${cleanUrl}`
+        );
+      }
+
+      localPath = path.join("/var/lib/telegram-bot-api", cleanUrl);
     }
 
     // Clean up any double slashes or incorrect path constructions
