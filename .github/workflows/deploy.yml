@@ -18,16 +18,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.x"
+          node-version: "22"
+          cache: "npm"
 
       - name: Install dependencies and build
         run: |
-          if [ -e package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          echo "=== Installing dependencies ==="
+          npm ci
+
+          echo "=== Building the application ==="
           npm run build
+
+          echo "=== Build completed successfully ==="
+          ls -la dist/
 
       - name: Setup Tailscale
         uses: tailscale/github-action@v3
@@ -44,178 +47,165 @@ jobs:
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Create environment file
-        run: |
-          cat > .env.production << EOF
-          TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
-          LOCAL_TELEGRAM_API_ROOT=http://127.0.0.1:8081
-          FFMPEG_PATH=/usr/bin/ffmpeg
-          FFPROBE_PATH=/usr/bin/ffprobe
-          CLEANUP_DIRECTORY=/var/lib/telegram-bot-api
-          CLEANUP_INTERVAL_HOURS=24
-          NODE_ENV=production
-          EOF
-
-      - name: Stop services and prepare for deployment
-        run: |
-          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            echo "=== Stopping services and preparing for deployment ==="
-            
-            # Stop PM2 process first
-            if pm2 describe audio-merger-bot > /dev/null 2>&1; then
-              echo "Stopping PM2 process..."
-              pm2 stop audio-merger-bot || true
-              pm2 delete audio-merger-bot || true
-            fi
-            
-            # Navigate to project directory
-            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot || exit 1
-            
-            echo "✓ Services stopped and ready for deployment"
-          EOF
-
-      - name: Pull latest code from repository
+      - name: Stop existing services
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            echo "=== Pulling latest code ==="
+            echo "=== Stopping existing services ==="
             
-            # Fix ownership first
-            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
-            
-            # Get current commit for comparison
-            CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-            echo "Current commit: $CURRENT_COMMIT"
-            
-            # Pull as the saksham user (not root)
-            git pull origin master
-            
-            # Verify the update
-            NEW_COMMIT=$(git rev-parse HEAD)
-            echo "New commit: $NEW_COMMIT"
-            
-            if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ]; then
-              echo "✅ Code updated successfully from $CURRENT_COMMIT to $NEW_COMMIT"
-            else
-              echo "ℹ️  Code was already up to date"
+            # Stop Docker Compose services if they exist
+            if [ -f docker-compose.yml ]; then
+              echo "Stopping Docker Compose services..."
+              docker-compose down || true
             fi
             
-            # Show current file structure
-            echo "Current file structure:"
-            ls -la src/ 2>/dev/null || echo "src directory not found"
+            echo "✅ Services stopped"
           EOF
 
-      - name: Deploy built files and configurations
+      - name: Transfer built code to server
         run: |
-          echo 'Transferring built files and configurations...'
+          echo "=== Transferring built application to server ==="
 
-          # Transfer all source files (to ensure complete modular structure)
-          rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
-            src/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/src/
+          # Create the directory if it doesn't exist
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} \
+            "mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot"
 
-          # Transfer built files
-          rsync -avz --delete -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
+          # Transfer built dist folder and necessary files
+          rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
 
-          # Transfer configuration files
+          # Transfer Docker files and package.json
           rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
-            package.json ecosystem.config.js .env.production tsconfig.json \
+            Dockerfile docker-compose.yml package*.json \
             saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
 
-      - name: Fix permissions and install dependencies
+          echo "✅ Built code transferred successfully"
+
+      - name: Setup git repository and pull latest code
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            echo "=== Fixing permissions ==="
-            # Fix ownership and permissions
-            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
-            chmod -R 755 /home/saksham/Desktop/telegram-bots/audio-merger-bot/
+            echo "=== Setting up git repository ==="
             
-            # Clean old installations
-            sudo rm -rf node_modules package-lock.json 2>/dev/null || true
-            
-            echo "=== Installing dependencies ==="
-            # Install with sudo to avoid permission issues
-            sudo npm install --production --no-audit --no-fund --unsafe-perm --allow-root || {
-              echo "Sudo install failed, trying alternative..."
-              npm cache clean --force
-              npm install --production --no-audit --no-fund --legacy-peer-deps
-            }
-            
-            # Fix ownership after installation
-            sudo chown -R saksham:saksham /home/saksham/Desktop/telegram-bots/audio-merger-bot/
-            
-            # Configure environment
-            if [ -f .env.production ]; then
-              mv .env.production .env
-              echo "✓ Environment file configured"
+            # Initialize git repo if it doesn't exist
+            if [ ! -d .git ]; then
+              echo "Initializing git repository..."
+              git init
+              git remote add origin https://github.com/yourusername/audio-merger-bot.git
             fi
             
-            echo "=== Verifying new file structure ==="
-            echo "Source files:"
-            find src/ -name "*.ts" | head -10
-            echo "Built files:"
-            find dist/ -name "*.js" | head -10
+            # Configure git to avoid conflicts with transferred files
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
             
-            echo "✅ Dependencies and structure updated"
+            # Fetch and pull latest changes (this ensures we have the latest source)
+            echo "Pulling latest changes from master..."
+            git fetch origin
+            git reset --hard origin/master
+            
+            echo "✅ Git repository updated"
+            echo "Current commit: $(git rev-parse --short HEAD)"
+            echo "Latest commit message: $(git log -1 --pretty=format:'%s')"
           EOF
 
-      - name: Start PM2 process
+      - name: Start Docker services and deploy
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
-            echo "=== Starting PM2 process ==="
+            echo "=== Creating environment file ==="
+            cat > .env << ENVEOF
+            TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}
+            TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}
+            TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
+            ENVEOF
             
-            # Ensure PM2 is available
-            if ! command -v pm2 &> /dev/null; then
-              echo "Installing PM2..."
-              sudo npm install -g pm2
-            fi
+            chmod 600 .env
             
-            # Start fresh PM2 process
-            echo "🚀 Starting audio-merger-bot with PM2..."
-            pm2 start ecosystem.config.js --env production
+            echo "=== Ensuring required directories exist ==="
+            sudo mkdir -p /var/lib/telegram-bot-api
+            sudo chown -R saksham:saksham /var/lib/telegram-bot-api
             
-            # Save PM2 configuration
-            pm2 save
+            echo "=== Starting Docker services ==="
             
-            echo "✅ PM2 process started successfully!"
+            # Start Telegram Bot API service first
+            echo "Starting Telegram Bot API service..."
+            docker-compose up -d telegram-bot-api
+            
+            # Wait for Telegram Bot API to be ready
+            echo "Waiting for Telegram Bot API to be ready..."
+            for i in {1..30}; do
+              if curl -s http://127.0.0.1:8081 > /dev/null 2>&1; then
+                echo "✅ Telegram Bot API is ready!"
+                break
+              fi
+              echo "Attempt $i/30: Waiting for service..."
+              sleep 2
+            done
+            
+            # Now start the audio merger bot (it will use the pre-built dist folder)
+            echo "Starting audio merger bot..."
+            docker-compose up -d audio-merger-bot
+            
+            echo "=== Waiting for all services to stabilize ==="
+            sleep 15
+            
+            echo "✅ Deployment completed!"
           EOF
 
       - name: Verify deployment
         run: |
-          echo "⏳ Waiting for process to initialize..."
-          sleep 15
-
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
             echo "=== DEPLOYMENT VERIFICATION ==="
             echo ""
             
-            echo "📊 PM2 Status:"
-            pm2 status audio-merger-bot
+            echo "📁 Deployed Files:"
+            echo "Built dist folder: $(ls -la dist/ | wc -l) files"
+            echo "Git status: $(git status --porcelain | wc -l) uncommitted changes"
+            echo "Current commit: $(git rev-parse --short HEAD)"
             echo ""
             
-            echo "🔍 Git Status:"
-            echo "Current commit: $(git rev-parse HEAD)"
-            echo "Current branch: $(git branch --show-current)"
+            echo "🐳 Docker Compose Status:"
+            docker-compose ps
             echo ""
             
-            echo "📁 File Structure Verification:"
-            echo "Source structure:"
-            ls -la src/
-            echo ""
-            echo "Services directory:"
-            ls -la src/services/ 2>/dev/null || echo "Services directory not found"
+            echo "📊 Container Health:"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
             echo ""
             
-            echo "📝 Recent Logs:"
-            pm2 logs audio-merger-bot --lines 10 --nostream 2>/dev/null || echo "No logs available yet"
+            echo "🔍 Service Logs (last 10 lines each):"
+            echo "--- Telegram Bot API ---"
+            docker-compose logs --tail=10 telegram-bot-api
+            echo ""
+            echo "--- Audio Merger Bot ---"
+            docker-compose logs --tail=10 audio-merger-bot
             echo ""
             
-            echo "🚀 Deployment completed!"
+            echo "🌐 Port Check:"
+            if curl -s http://127.0.0.1:8081 > /dev/null 2>&1; then
+              echo "✅ Telegram Bot API is responding on port 8081"
+            else
+              echo "❌ Telegram Bot API is not responding on port 8081"
+            fi
+            
+            echo ""
+            echo "🚀 Deployment verification completed!"
+          EOF
+
+      - name: Cleanup old resources
+        run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            echo "=== Cleaning up unused Docker resources ==="
+            
+            # Remove unused images (keep recent ones)
+            docker image prune -f --filter "until=24h" || true
+            
+            # Remove unused containers
+            docker container prune -f || true
+            
+            echo "✅ Cleanup completed"
           EOF
