@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { UserSession, AudioQueueItem } from "../types";
+import { UserSession, AudioQueueItem, MixedQueueItem } from "../types";
 import { Logger } from "../utils/logger";
 
 export class SessionManager {
@@ -54,6 +54,7 @@ export class SessionManager {
   createSession(userId: number): UserSession {
     const session: UserSession = {
       audioFiles: [],
+      mixedQueue: [],
       createdAt: Date.now(),
       lastActivity: Date.now(),
     };
@@ -87,6 +88,41 @@ export class SessionManager {
     session.audioFiles.push(audioFile);
     this.updateSession(userId, session);
     return true;
+  }
+
+  addMixedItem(userId: number, item: MixedQueueItem): boolean {
+    let session = this.getSession(userId);
+    if (!session) {
+      session = this.createSession(userId);
+    }
+
+    if (session.mixedQueue.length >= 10) {
+      return false;
+    }
+
+    item.timestamp = Date.now();
+    session.mixedQueue.push(item);
+    this.updateSession(userId, session);
+    return true;
+  }
+
+  getMixedQueueStatus(userId: number): {
+    count: number;
+    items: MixedQueueItem[];
+  } {
+    const session = this.getSession(userId);
+    return {
+      count: session?.mixedQueue?.length || 0,
+      items: session?.mixedQueue || [],
+    };
+  }
+
+  clearMixedQueue(userId: number): void {
+    const session = this.getSession(userId);
+    if (session) {
+      session.mixedQueue = [];
+      this.updateSession(userId, session);
+    }
   }
 
   getQueueStatus(userId: number): { count: number; files: AudioQueueItem[] } {

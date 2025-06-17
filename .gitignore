@@ -57,3 +57,5 @@ yarn.lock
 
 # Ignore the telegram-bot-api
 telegram-bot-api/
+
+user-sessions.json

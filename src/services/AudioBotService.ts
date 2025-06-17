@@ -1,318 +1,210 @@
 import { Telegraf, Context } from "telegraf";
 import { message } from "telegraf/filters";
-import { AudioQueueItem, DownloadResult, ProcessingStatus } from "../types";
+import { AudioQueueItem, DownloadResult, MixedQueueItem } from "../types";
 import { FileDownloadService } from "./FileDownloadService";
 import { AudioMergeService } from "./AudioMergeService";
 import { SessionManager } from "./SessionManager";
+import { MixedInputService } from "./MixedInputService";
 import { Logger } from "../utils/logger";
 
 export class AudioBotService {
   private bot: Telegraf;
-  private fileDownloadService: FileDownloadService;
-  private audioMergeService: AudioMergeService;
-  private sessionManager: SessionManager;
-  private processingUsers = new Set<number>();
+  private sessionManager = new SessionManager();
+  private fileDownload = new FileDownloadService();
+  private audioMerge = new AudioMergeService();
+  private youtubeParser = new MixedInputService();
   private logger = new Logger("AudioBotService");
+  private processingUsers = new Set<number>();
   private botStartTime = Date.now();
 
   constructor(token: string, apiRoot?: string) {
-    this.bot = new Telegraf(token, {
-      telegram: {
-        apiRoot: apiRoot || "http://127.0.0.1:8081",
-      },
-    });
-
-    this.fileDownloadService = new FileDownloadService();
-    this.audioMergeService = new AudioMergeService();
-    this.sessionManager = new SessionManager();
-
+    this.bot = new Telegraf(token, { telegram: { apiRoot: apiRoot } });
     this.setupHandlers();
     this.setupErrorHandling();
   }
 
   private setupHandlers(): void {
-    // Start command
     this.bot.start((ctx) =>
       ctx.reply(
-        `🎵 Welcome to Audio Merger Bot!\n\n` +
-          "Send audio files one by one, then use /merge to combine them.\n" +
-          "Max 10 files per session. Supports large files up to 2GB!\n\n" +
-          "Supported formats: MP3, WAV, OGG, M4A"
+        `🎵 Welcome!
+Send audio files and YouTube links in any order to queue.
+Use /merge to combine, /status to view, /clear to reset.`
       )
     );
-
-    // Help command
     this.bot.help((ctx) =>
       ctx.reply(
-        `📖 Help Guide:\n\n` +
-          "/merge - Combine queued audio files\n" +
-          "/cancel - Clear current queue\n" +
-          "/status - Show current queue\n" +
-          "/help - Show this guide\n\n" +
-          "Just send audio files to add them to your merge queue!"
+        `📖 Commands:
+/start - Welcome
+/help - This message
+/merge - Merge queued items
+/status - Show queue status
+/clear - Clear queue
+
+Send up to 20 audio files or YouTube URLs before /merge.`
       )
     );
 
-    // Audio message handler
+    // Add audio attachments
     this.bot.on(message("audio"), async (ctx) => {
-      await this.handleAudioMessage(ctx);
+      await this.addAudio(ctx);
     });
-
-    // Voice message handler
-    this.bot.on(message("voice"), async (ctx) => {
+    // Ignore voice
+    this.bot.on(message("voice"), (ctx) =>
+      ctx.reply("🔇 Voice not supported; please send as audio file.")
+    );
+    // Parse YouTube URLs from text
+    this.bot.on(message("text"), async (ctx, next) => {
+      const txt = (ctx.message as any).text.trim();
+      if (txt.startsWith("/")) return next();
+      // parse lines
+      const items = this.youtubeParser
+        .parseInput(txt)
+        .filter((i) => i.type === "youtube");
+      if (!items.length) return;
+      const userId = ctx.from!.id;
+      let added = 0;
+      for (const i of items) {
+        const mi: MixedQueueItem = { ...i, timestamp: Date.now() };
+        if (!this.sessionManager.addMixedItem(userId, mi)) break;
+        added++;
+      }
+      const status = this.sessionManager.getMixedQueueStatus(userId);
       await ctx.reply(
-        "🎤 Voice messages detected! Please convert to audio file format (MP3, WAV, etc.) for merging."
+        `🎧 Added ${added} YouTube link(s). Queue: ${status.count}/20.`
       );
     });
 
-    // Commands
-    this.bot.command("merge", async (ctx) => {
-      await this.handleMergeCommand(ctx);
-    });
-
-    this.bot.command("status", async (ctx) => {
-      await this.handleStatusCommand(ctx);
-    });
-
-    this.bot.command("cancel", async (ctx) => {
-      await this.handleCancelCommand(ctx);
-    });
+    this.bot.command("status", (ctx) => this.showStatus(ctx));
+    this.bot.command("clear", (ctx) => this.clearQueue(ctx));
+    this.bot.command("merge", (ctx) => this.processMerge(ctx));
   }
 
-  private async handleAudioMessage(
-    ctx: Context & { message: any }
-  ): Promise<void> {
+  private async addAudio(ctx: Context & { message: any }) {
     const userId = ctx.from!.id;
     const audio = ctx.message.audio;
-
-    // Ignore old messages (sent before bot startup)
-    const messageTime = ctx.message.date * 1000;
-    if (messageTime < this.botStartTime - 300000) {
-      // 5 minutes grace period
-      this.logger.log(`Ignoring old message from ${new Date(messageTime)}`);
-      return;
-    }
-
-    const audioFile: AudioQueueItem = {
-      fileId: audio.file_id,
+    // ignore old
+    if (ctx.message.date * 1000 < this.botStartTime - 300000) return;
+    const item: MixedQueueItem = {
+      type: "audio_file",
+      content: audio.file_id,
       fileName: audio.file_name || `audio_${Date.now()}`,
-      userId,
       timestamp: Date.now(),
     };
-
-    const success = this.sessionManager.addAudioFile(userId, audioFile);
-
-    if (!success) {
-      await ctx.reply("❌ Queue is full (10/10). Use /merge or /cancel first.");
-      return;
+    if (!this.sessionManager.addMixedItem(userId, item)) {
+      return ctx.reply("❌ Queue full (20). Use /merge or /clear first.");
     }
-
-    const status = this.sessionManager.getQueueStatus(userId);
+    const status = this.sessionManager.getMixedQueueStatus(userId);
     await ctx.reply(
-      `🎧 Audio added to queue! (${status.count}/10)\n` +
-        "Send another audio file or use /merge to combine them."
+      `🎧 Audio added (${status.count}/20). Send more or /merge.`
     );
   }
 
-  private async handleMergeCommand(ctx: Context): Promise<void> {
+  private showStatus(ctx: Context) {
     const userId = ctx.from!.id;
-
-    // Check if user is already processing
-    if (this.processingUsers.has(userId)) {
-      await ctx.reply(
-        "⏳ You already have a merge operation in progress. Please wait..."
-      );
-      return;
-    }
-
-    const session = this.sessionManager.getSession(userId);
-    if (!session?.audioFiles.length) {
-      await ctx.reply("❌ No audio files in queue. Send audio files first.");
-      return;
-    }
-
-    if (session.audioFiles.length < 2) {
-      await ctx.reply("❌ Need at least 2 audio files to merge.");
-      return;
-    }
-
-    // Mark user as processing
-    this.processingUsers.add(userId);
-
-    try {
-      await this.processAudioMerge(ctx, userId, session.audioFiles);
-    } catch (error) {
-      this.logger.error("Merge operation failed:", error);
-      await this.handleMergeError(ctx, error);
-    } finally {
-      // Always remove from processing set and cleanup session
-      this.processingUsers.delete(userId);
-      this.sessionManager.deleteSession(userId);
-    }
+    const st = this.sessionManager.getMixedQueueStatus(userId);
+    if (!st.count) return ctx.reply("📭 Queue empty.");
+    const list = st.items
+      .map(
+        (i, idx) =>
+          `${idx + 1}. ${i.type === "youtube" ? "YT" : "File"}: ${i.content}`
+      )
+      .join("\n");
+    ctx.reply(`📥 Queue (${st.count}/20):\n${list}`);
   }
 
-  private async processAudioMerge(
-    ctx: Context,
-    userId: number,
-    audioFiles: AudioQueueItem[]
-  ): Promise<void> {
-    const processingMsg = await ctx.reply(
-      "⏳ Processing large files... This may take several minutes."
-    );
+  private clearQueue(ctx: Context) {
+    const userId = ctx.from!.id;
+    const st = this.sessionManager.getMixedQueueStatus(userId);
+    if (!st.count) return ctx.reply("❌ Nothing to clear.");
+    this.sessionManager.clearMixedQueue(userId);
+    ctx.reply("🗑 Queue cleared.");
+  }
 
-    // Download all files
-    this.logger.log(
-      `Starting download of ${audioFiles.length} files for user ${userId}`
-    );
-
-    // Send single progress message instead of per-file messages
-    await ctx.reply(`📥 Downloading ${audioFiles.length} files...`);
-
+  private async processMerge(ctx: Context) {
+    const userId = ctx.from!.id;
+    if (this.processingUsers.has(userId)) {
+      return ctx.reply("⏳ Merge in progress...");
+    }
+    const st = this.sessionManager.getMixedQueueStatus(userId);
+    if (st.count < 2) {
+      return ctx.reply("❌ Need at least 2 items in queue before /merge.");
+    }
+    this.processingUsers.add(userId);
     const downloads: DownloadResult[] = [];
-
+    let mergeResult: any = null;
+    await ctx.reply(`🔄 Merging ${st.count} items...`);
     try {
-      for (let i = 0; i < audioFiles.length; i++) {
-        const file = audioFiles[i];
-        const fileLink = await this.bot.telegram.getFileLink(file.fileId);
-        const download = await this.fileDownloadService.downloadFile(
-          fileLink.href,
-          userId
-        );
-        downloads.push(download);
-
-        // Update progress every 3 files to avoid rate limiting
-        if ((i + 1) % 3 === 0 || i === audioFiles.length - 1) {
-          await ctx.reply(
-            `📥 Downloaded ${i + 1}/${audioFiles.length} files...`
+      // download all
+      for (const [idx, it] of st.items.entries()) {
+        if (it.type === "youtube") {
+          const dl = await this.youtubeParser.processItems(
+            [it],
+            this.bot,
+            userId
           );
+          downloads.push(...dl);
+        } else {
+          const link = await this.bot.telegram.getFileLink(it.content);
+          const downloadedFile = await this.fileDownload.downloadFile(
+            link.href,
+            userId
+          );
+          console.log("Downloaded to: ", downloadedFile.path);
+          downloads.push(downloadedFile);
         }
+        if ((idx + 1) % 5 === 0)
+          await ctx.reply(`📥 Downloaded ${idx + 1}/${st.count}`);
+      }
+      await ctx.reply("🔀 Combining audio...");
+      const paths = downloads.map((d) => d.path);
+      mergeResult = await this.audioMerge.mergeAudios(paths, {
+        threads: 2,
+        bitrate: 192,
+      });
+      console.log("Merged output at: ", mergeResult);
+      await ctx.replyWithAudio({
+        source: mergeResult.path,
+        filename: `merged_${Date.now()}.mp3`,
+      });
+      await ctx.reply("✅ Merge complete.");
+
+      this.sessionManager.clearMixedQueue(userId);
+    } catch (err) {
+      this.logger.error("Merge failed", err);
+      await ctx.reply("❌ Merge error. Try again.");
+    } finally {
+      // Clean up all temporary files
+      const cleanupPromises = [];
+
+      // Clean up downloaded files
+      for (const d of downloads) {
+        cleanupPromises.push(d.cleanup());
       }
 
-      await ctx.reply("🔄 Merging audio files... Please wait...");
-
-      // Add periodic progress updates for long operations
-      const progressInterval = setInterval(async () => {
-        try {
-          await ctx.reply(
-            "🔄 Still processing... Large files take time on our server."
-          );
-        } catch (e) {
-          // Ignore if user blocked bot or chat closed
-        }
-      }, 120000); // Every 2 minutes
+      // Clean up merged output
+      if (mergeResult?.cleanup) {
+        cleanupPromises.push(mergeResult.cleanup());
+      }
 
       try {
-        // Merge files without timeout - let FFmpeg finish naturally
-        const outputPath = await this.audioMergeService.mergeAudios(
-          downloads.map((d) => d.path),
-          { threads: 1, bitrate: 192 }
-        );
-
-        clearInterval(progressInterval);
-
-        await ctx.reply("📤 Uploading merged file...");
-
-        // Send merged file
-        await ctx.replyWithAudio({
-          source: outputPath,
-          filename: `merged_${Date.now()}.mp3`,
-        });
-
-        await ctx.reply("✅ Audio files merged successfully!");
-      } catch (error) {
-        clearInterval(progressInterval);
-        throw error;
+        await Promise.all(cleanupPromises);
+        this.logger.log("All cleanup operations completed");
+      } catch (cleanupError) {
+        this.logger.error("Some cleanup operations failed:", cleanupError);
       }
-    } finally {
-      // Cleanup all downloaded files
-      for (const download of downloads) {
-        try {
-          await download.cleanup();
-        } catch (error) {
-          this.logger.error("Failed to cleanup download:", error);
-        }
-      }
+      this.processingUsers.delete(userId);
     }
   }
 
-  private async handleMergeError(ctx: Context, error: any): Promise<void> {
-    if (error instanceof Error) {
-      if (error.message.includes("timed out")) {
-        await ctx.reply(
-          "❌ Processing timed out. Files may be too large for current server capacity. Try with smaller files."
-        );
-      } else if (error.message.includes("429")) {
-        await ctx.reply(
-          "❌ Too many requests. Please wait a moment and try again."
-        );
-      } else {
-        await ctx.reply(
-          "❌ Error processing audio files. Please try again with smaller files."
-        );
-      }
-    } else {
-      await ctx.reply("❌ An unexpected error occurred. Please try again.");
-    }
+  private setupErrorHandling() {
+    this.bot.catch((err) => this.logger.error("Bot error", err));
   }
 
-  private async handleStatusCommand(ctx: Context): Promise<void> {
-    const status = this.sessionManager.getQueueStatus(ctx.from!.id);
-
-    if (!status.count) {
-      await ctx.reply("📭 Your queue is empty");
-      return;
-    }
-
-    const fileList = status.files
-      .map((f, i) => `${i + 1}. ${f.fileName}`)
-      .join("\n");
-
-    await ctx.reply(`📥 Current queue (${status.count}/10):\n\n${fileList}`);
-  }
-
-  private async handleCancelCommand(ctx: Context): Promise<void> {
-    const session = this.sessionManager.getSession(ctx.from!.id);
-
-    if (!session?.audioFiles.length) {
-      await ctx.reply("📭 Your queue is already empty");
-      return;
-    }
-
-    this.sessionManager.deleteSession(ctx.from!.id);
-    await ctx.reply("🗑 Queue cleared");
-  }
-
-  private setupErrorHandling(): void {
-    this.bot.catch((err) => {
-      this.logger.error("Bot error:", err);
-    });
-
-    // Cleanup old sessions periodically
-    setInterval(() => {
-      this.sessionManager.cleanupOldSessions(24);
-    }, 60 * 60 * 1000); // Every hour
-  }
-
-  async launch(): Promise<void> {
+  async launch() {
     await this.bot.launch();
-    this.logger.log("🚀 Audio Merger Bot is running with large file support!");
   }
-
-  stop(reason?: string): void {
-    this.bot.stop(reason);
+  stop() {
+    this.bot.stop();
     this.sessionManager.destroy();
-  }
-
-  // Public API for external use
-  async mergeAudioFiles(filePaths: string[]): Promise<string> {
-    return this.audioMergeService.mergeAudios(filePaths);
-  }
-
-  async downloadFile(url: string, userId: number): Promise<DownloadResult> {
-    return this.fileDownloadService.downloadFile(url, userId);
-  }
-
-  getSessionManager(): SessionManager {
-    return this.sessionManager;
   }
 }

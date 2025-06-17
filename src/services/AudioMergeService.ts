@@ -1,6 +1,6 @@
 import ffmpeg from "fluent-ffmpeg";
 import tmp from "tmp-promise";
-import { MergeOptions } from "../types";
+import { FileOptions, MergeOptions } from "../types";
 import { Logger } from "../utils/logger";
 
 // Try to detect FFmpeg paths dynamically
@@ -130,7 +130,7 @@ export class AudioMergeService {
   async mergeAudios(
     files: string[],
     options: MergeOptions = {}
-  ): Promise<string> {
+  ): Promise<FileOptions> {
     // Analyze input files to determine optimal settings
     const analysis = await this.analyzeInputFiles(files);
 
@@ -149,6 +149,8 @@ export class AudioMergeService {
     );
 
     const outputFile = await tmp.file({ postfix: `.${format}` });
+    const tempDir = await tmp.dir({ unsafeCleanup: true });
+    console.log("tempDir: ", tempDir);
 
     return new Promise((resolve, reject) => {
       this.logger.log(`Starting merge of ${files.length} files`);
@@ -214,19 +216,29 @@ export class AudioMergeService {
         })
         .on("end", () => {
           this.logger.log("FFmpeg merge completed successfully");
-          resolve(outputFile.path);
+          resolve({
+            ...outputFile,
+            cleanup: async () => {
+              try {
+                await Promise.all([outputFile.cleanup(), tempDir.cleanup()]);
+                this.logger.log("All temporary files cleaned up successfully");
+              } catch (error) {
+                this.logger.error("Cleanup error:", error);
+              }
+            },
+          });
         })
         .on("error", (error) => {
           this.logger.error("FFmpeg error:", error);
           outputFile.cleanup();
           reject(error);
         })
-        .mergeToFile(outputFile.path, tmp.dirSync().name);
+        .mergeToFile(outputFile.path, tempDir.path);
     });
   }
 
   // Convenience method for high-quality merging
-  async mergeAudiosHighQuality(files: string[]): Promise<string> {
+  async mergeAudiosHighQuality(files: string[]): Promise<FileOptions> {
     return this.mergeAudios(files, {
       bitrate: 320, // Maximum MP3 bitrate
       format: "mp3",
@@ -234,7 +246,7 @@ export class AudioMergeService {
   }
 
   // Convenience method for lossless merging
-  async mergeAudiosLossless(files: string[]): Promise<string> {
+  async mergeAudiosLossless(files: string[]): Promise<FileOptions> {
     return this.mergeAudios(files, {
       format: "flac",
     });

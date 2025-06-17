@@ -5,8 +5,16 @@ export interface AudioQueueItem {
   timestamp: number;
 }
 
+export interface MixedQueueItem {
+  type: "youtube" | "audio_file";
+  content: string; // URL for YouTube, file_id for audio
+  fileName?: string;
+  timestamp: number;
+}
+
 export interface UserSession {
   audioFiles: AudioQueueItem[];
+  mixedQueue: MixedQueueItem[];
   createdAt: number;
   lastActivity: number;
 }
@@ -29,4 +37,9 @@ export interface ProcessingStatus {
   status: "downloading" | "merging" | "uploading" | "completed" | "error";
   progress?: number;
   message?: string;
+}
+
+export interface FileOptions {
+  path: string;
+  cleanup: () => void;
 }

@@ -34,12 +34,12 @@ async function main() {
   // Graceful shutdown
   process.once("SIGINT", () => {
     console.log("Received SIGINT, shutting down gracefully...");
-    botService.stop("SIGINT");
+    botService.stop();
   });
 
   process.once("SIGTERM", () => {
     console.log("Received SIGTERM, shutting down gracefully...");
-    botService.stop("SIGTERM");
+    botService.stop();
   });
 }
 
