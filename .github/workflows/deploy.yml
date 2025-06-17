@@ -116,23 +116,45 @@ jobs:
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
             echo "=== Creating environment file ==="
-            cat > .env << ENVEOF
-            TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}
-            TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}
-            TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
-            ENVEOF
-            
+            echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" > .env
+            echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+            echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" >> .env
             chmod 600 .env
             
             echo "=== Ensuring required directories exist ==="
             sudo mkdir -p /var/lib/telegram-bot-api
             sudo chown -R saksham:saksham /var/lib/telegram-bot-api
             
+            echo "=== Checking Docker setup ==="
+            # Check if docker-compose is available
+            if command -v docker-compose &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker-compose"
+            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker compose"
+            else
+              echo "Installing docker-compose..."
+              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+              DOCKER_COMPOSE_CMD="docker-compose"
+            fi
+            
+            # Add user to docker group if not already added
+            if ! groups | grep -q docker; then
+              echo "Adding user to docker group..."
+              sudo usermod -aG docker saksham
+              echo "Please note: You may need to log out and back in for group changes to take effect"
+              echo "Using sudo for docker commands in this session..."
+              DOCKER_COMPOSE_CMD="sudo $DOCKER_COMPOSE_CMD"
+            fi
+            
             echo "=== Starting Docker services ==="
+            
+            # Stop existing services
+            $DOCKER_COMPOSE_CMD down || true
             
             # Start Telegram Bot API service first
             echo "Starting Telegram Bot API service..."
-            docker-compose up -d telegram-bot-api
+            $DOCKER_COMPOSE_CMD up -d telegram-bot-api
             
             # Wait for Telegram Bot API to be ready
             echo "Waiting for Telegram Bot API to be ready..."
@@ -145,12 +167,9 @@ jobs:
               sleep 2
             done
             
-            # Now start the audio merger bot (it will use the pre-built dist folder)
+            # Start the audio merger bot
             echo "Starting audio merger bot..."
-            docker-compose up -d audio-merger-bot
-            
-            echo "=== Waiting for all services to stabilize ==="
-            sleep 15
+            $DOCKER_COMPOSE_CMD up -d audio-merger-bot
             
             echo "✅ Deployment completed!"
           EOF
@@ -160,29 +179,40 @@ jobs:
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
             
+            # Determine docker-compose command
+            if command -v docker-compose &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker-compose"
+            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker compose"
+            else
+              DOCKER_COMPOSE_CMD="sudo docker-compose"
+            fi
+            
+            # Use sudo if user not in docker group
+            if ! groups | grep -q docker; then
+              DOCKER_COMPOSE_CMD="sudo $DOCKER_COMPOSE_CMD"
+              DOCKER_CMD="sudo docker"
+            else
+              DOCKER_CMD="docker"
+            fi
+            
             echo "=== DEPLOYMENT VERIFICATION ==="
             echo ""
             
-            echo "📁 Deployed Files:"
-            echo "Built dist folder: $(ls -la dist/ | wc -l) files"
-            echo "Git status: $(git status --porcelain | wc -l) uncommitted changes"
-            echo "Current commit: $(git rev-parse --short HEAD)"
-            echo ""
-            
             echo "🐳 Docker Compose Status:"
-            docker-compose ps
+            $DOCKER_COMPOSE_CMD ps
             echo ""
             
             echo "📊 Container Health:"
-            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            $DOCKER_CMD ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
             echo ""
             
             echo "🔍 Service Logs (last 10 lines each):"
             echo "--- Telegram Bot API ---"
-            docker-compose logs --tail=10 telegram-bot-api
+            $DOCKER_COMPOSE_CMD logs --tail=10 telegram-bot-api
             echo ""
             echo "--- Audio Merger Bot ---"
-            docker-compose logs --tail=10 audio-merger-bot
+            $DOCKER_COMPOSE_CMD logs --tail=10 audio-merger-bot
             echo ""
             
             echo "🌐 Port Check:"
@@ -192,7 +222,6 @@ jobs:
               echo "❌ Telegram Bot API is not responding on port 8081"
             fi
             
-            echo ""
             echo "🚀 Deployment verification completed!"
           EOF
 
