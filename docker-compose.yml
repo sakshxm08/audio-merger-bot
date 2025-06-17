@@ -3,7 +3,7 @@ services:
     image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
     restart: unless-stopped
-    user: "1000:1000"
+    user: "0:0"
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
@@ -29,7 +29,7 @@ services:
       dockerfile: Dockerfile
     container_name: audio-merger-bot
     restart: unless-stopped
-    user: "1000:1000"
+    user: "0:0"
     depends_on:
       telegram-bot-api:
         condition: service_healthy
