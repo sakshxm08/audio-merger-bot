@@ -11,7 +11,7 @@ services:
       TELEGRAM_HTTP_PORT: 8081
       TELEGRAM_MAX_FILESIZE: 2000000000
     volumes:
-      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
     ports:
       - "127.0.0.1:8081:8081"
       - "127.0.0.1:8082:8082"
@@ -20,7 +20,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s # Give more time for startup
+      start_period: 120s
+
   audio-merger-bot:
     build:
       context: .
@@ -35,8 +36,10 @@ services:
       LOCAL_TELEGRAM_API_ROOT: "http://telegram-bot-api:8081"
       FFMPEG_PATH: /usr/bin/ffmpeg
       FFPROBE_PATH: /usr/bin/ffprobe
-      CLEANUP_DIRECTORY: /var/lib/telegram-bot-api
       CLEANUP_INTERVAL_HOURS: 24
       NODE_ENV: production
     volumes:
-      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
+      - telegram-bot-api-data:/var/lib/telegram-bot-api # Share the same volume
+
+volumes:
+  telegram-bot-api-data: # Define the named volume
