@@ -21,18 +21,16 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Cache build artifacts
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.npm
-            dist/
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-
       - name: Install dependencies and build
         run: |
+          echo "=== Installing dependencies ==="
           npm ci
+
+          echo "=== Building the application ==="
           npm run build
+
+          echo "=== Build completed successfully ==="
+          ls -la dist/
 
       - name: Setup Tailscale
         uses: tailscale/github-action@v3
@@ -53,56 +51,190 @@ jobs:
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== Stopping existing services ==="
+            
+            # Stop Docker Compose services if they exist
             if [ -f docker-compose.yml ]; then
+              echo "Stopping Docker Compose services..."
               docker-compose down || true
             fi
+            
+            echo "✅ Services stopped"
           EOF
 
       - name: Transfer built code to server
         run: |
+          echo "=== Transferring built application to server ==="
+
+          # Create the directory if it doesn't exist
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} \
             "mkdir -p /home/saksham/Desktop/telegram-bots/audio-merger-bot"
+
+          # Transfer built dist folder and necessary files
           rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             dist/ saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/dist/
+
+          # Transfer Docker files and package.json
           rsync -avz -e "ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no" \
             Dockerfile docker-compose.yml package*.json \
             saksham@${{ secrets.DEPLOY_HOST }}:/home/saksham/Desktop/telegram-bots/audio-merger-bot/
+
+          echo "✅ Built code transferred successfully"
+
+      - name: Setup git repository and pull latest code
+        run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            echo "=== Setting up git repository ==="
+            
+            # Initialize git repo if it doesn't exist
+            if [ ! -d .git ]; then
+              echo "Initializing git repository..."
+              git init
+              git remote add origin https://github.com/yourusername/audio-merger-bot.git
+            fi
+            
+            # Configure git to avoid conflicts with transferred files
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            
+            # Fetch and pull latest changes (this ensures we have the latest source)
+            echo "Pulling latest changes from master..."
+            git fetch origin
+            git reset --hard origin/master
+            
+            echo "✅ Git repository updated"
+            echo "Current commit: $(git rev-parse --short HEAD)"
+            echo "Latest commit message: $(git log -1 --pretty=format:'%s')"
+          EOF
 
       - name: Start Docker services and deploy
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            # Fix volume permissions first
-            sudo chown -R 1000:1000 /var/lib/telegram-bot-api
-
-            docker-compose up -d telegram-bot-api
-
-            # Extended wait with service logs
-            for i in {1..40}; do
-              if docker-compose exec -T telegram-bot-api curl -sSf http://localhost:8081/v1/health >/dev/null; then
-                echo "✅ Verified internal health check"
+            
+            echo "=== Creating environment file ==="
+            echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" > .env
+            echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+            echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" >> .env
+            chmod 600 .env
+            
+            echo "=== Ensuring required directories exist ==="
+            sudo mkdir -p /var/lib/telegram-bot-api
+            sudo chown -R saksham:saksham /var/lib/telegram-bot-api
+            
+            echo "=== Checking Docker setup ==="
+            # Check if docker-compose is available
+            if command -v docker-compose &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker-compose"
+            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker compose"
+            else
+              echo "Installing docker-compose..."
+              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+              DOCKER_COMPOSE_CMD="docker-compose"
+            fi
+            
+            # Add user to docker group if not already added
+            if ! groups | grep -q docker; then
+              echo "Adding user to docker group..."
+              sudo usermod -aG docker saksham
+              echo "Please note: You may need to log out and back in for group changes to take effect"
+              echo "Using sudo for docker commands in this session..."
+              DOCKER_COMPOSE_CMD="sudo $DOCKER_COMPOSE_CMD"
+            fi
+            
+            echo "=== Starting Docker services ==="
+            
+            # Stop existing services
+            $DOCKER_COMPOSE_CMD down || true
+            
+            # Start Telegram Bot API service first
+            echo "Starting Telegram Bot API service..."
+            $DOCKER_COMPOSE_CMD up -d telegram-bot-api
+            
+            # Wait for Telegram Bot API to be ready
+            echo "Waiting for Telegram Bot API to be ready..."
+            for i in {1..30}; do
+              if curl -s http://127.0.0.1:8081 > /dev/null 2>&1; then
+                echo "✅ Telegram Bot API is ready!"
                 break
               fi
-              echo "Attempt $i/40: Waiting for service..."
-              docker-compose logs --tail=20 telegram-bot-api || true
-              sleep 5
+              echo "Attempt $i/30: Waiting for service..."
+              sleep 2
             done
-
-            docker-compose up -d audio-merger-bot
+            
+            # Start the audio merger bot
+            echo "Starting audio merger bot..."
+            $DOCKER_COMPOSE_CMD up -d audio-merger-bot
+            
+            echo "✅ Deployment completed!"
           EOF
 
       - name: Verify deployment
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
+            
+            # Determine docker-compose command
+            if command -v docker-compose &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker-compose"
+            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              DOCKER_COMPOSE_CMD="docker compose"
+            else
+              DOCKER_COMPOSE_CMD="sudo docker-compose"
+            fi
+            
+            # Use sudo if user not in docker group
+            if ! groups | grep -q docker; then
+              DOCKER_COMPOSE_CMD="sudo $DOCKER_COMPOSE_CMD"
+              DOCKER_CMD="sudo docker"
+            else
+              DOCKER_CMD="docker"
+            fi
+            
             echo "=== DEPLOYMENT VERIFICATION ==="
-            docker-compose ps
-            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-            docker-compose logs --tail=10 telegram-bot-api
-            docker-compose logs --tail=10 audio-merger-bot
+            echo ""
+            
+            echo "🐳 Docker Compose Status:"
+            $DOCKER_COMPOSE_CMD ps
+            echo ""
+            
+            echo "📊 Container Health:"
+            $DOCKER_CMD ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo ""
+            
+            echo "🔍 Service Logs (last 10 lines each):"
+            echo "--- Telegram Bot API ---"
+            $DOCKER_COMPOSE_CMD logs --tail=10 telegram-bot-api
+            echo ""
+            echo "--- Audio Merger Bot ---"
+            $DOCKER_COMPOSE_CMD logs --tail=10 audio-merger-bot
+            echo ""
+            
+            echo "🌐 Port Check:"
             if curl -s http://127.0.0.1:8081 > /dev/null 2>&1; then
               echo "✅ Telegram Bot API is responding on port 8081"
             else
               echo "❌ Telegram Bot API is not responding on port 8081"
             fi
+            
+            echo "🚀 Deployment verification completed!"
+          EOF
+
+      - name: Cleanup old resources
+        run: |
+          ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            echo "=== Cleaning up unused Docker resources ==="
+            
+            # Remove unused images (keep recent ones)
+            docker image prune -f --filter "until=24h" || true
+            
+            # Remove unused containers
+            docker container prune -f || true
+            
+            echo "✅ Cleanup completed"
           EOF
