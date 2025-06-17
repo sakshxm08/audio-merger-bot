@@ -72,22 +72,22 @@ jobs:
         run: |
           ssh -i ~/.ssh/github-audio-bot-deploy -o StrictHostKeyChecking=no saksham@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd /home/saksham/Desktop/telegram-bots/audio-merger-bot
-            echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" > .env
-            echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
-            echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" >> .env
-            chmod 600 .env
-            mkdir -p /var/lib/telegram-bot-api
-            chown -R saksham:saksham /var/lib/telegram-bot-api
-            docker-compose down || true
+            # Fix volume permissions first
+            sudo chown -R 1000:1000 /var/lib/telegram-bot-api
+
             docker-compose up -d telegram-bot-api
-            for i in {1..30}; do
-              if curl -s http://127.0.0.1:8081 > /dev/null 2>&1; then
-                echo "✅ Telegram Bot API is ready!"
+
+            # Extended wait with service logs
+            for i in {1..40}; do
+              if docker-compose exec -T telegram-bot-api curl -sSf http://localhost:8081/v1/health >/dev/null; then
+                echo "✅ Verified internal health check"
                 break
               fi
-              echo "Attempt $i/30: Waiting for service..."
-              sleep 2
+              echo "Attempt $i/40: Waiting for service..."
+              docker-compose logs --tail=20 telegram-bot-api || true
+              sleep 5
             done
+
             docker-compose up -d audio-merger-bot
           EOF
 
