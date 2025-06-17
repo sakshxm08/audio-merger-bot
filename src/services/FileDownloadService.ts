@@ -15,39 +15,89 @@ export class FileDownloadService {
   ): Promise<DownloadResult> {
     const url = fileLink;
 
-    // Check if it's a local file path (starts with file://)
-    if (url.startsWith("file://")) {
+    // Check if it's a local file path (starts with file:// OR is a local path)
+    if (url.startsWith("file://") || this.isLocalPath(url)) {
       return this.handleLocalFile(url);
     } else {
       return this.handleRemoteFile(url);
     }
   }
 
-  private async handleLocalFile(url: string): Promise<DownloadResult> {
-    let localPath = url.replace("file://", "");
+  private isLocalPath(url: string): boolean {
+    // Check if URL points to local API server
+    return (
+      url.includes("127.0.0.1:8081") ||
+      url.includes("localhost:8081") ||
+      url.includes("telegram-bot-api:8081") ||
+      !url.startsWith("http")
+    ); // Assume non-HTTP URLs are local paths
+  }
 
-    // Remove any server IP prefix that might be incorrectly added
-    if (localPath.startsWith("127.0.0.1/")) {
-      localPath = localPath.replace("127.0.0.1/", "/");
+  private async handleLocalFile(url: string): Promise<DownloadResult> {
+    let localPath: string;
+
+    if (url.startsWith("file://")) {
+      localPath = url.replace("file://", "");
+    } else if (url.startsWith("http")) {
+      // Extract file path from local API URL
+      // URL format: http://telegram-bot-api:8081/file/bot<token>/<file_path>
+      const urlParts = url.split("/file/");
+      if (urlParts.length > 1) {
+        const filePathPart = urlParts[1];
+        // Remove bot token prefix: bot<token>/<actual_path> -> <actual_path>
+        const pathAfterToken = filePathPart.substring(
+          filePathPart.indexOf("/") + 1
+        );
+        localPath = path.join("/var/lib/telegram-bot-api", pathAfterToken);
+      } else {
+        throw new Error(`Invalid local API URL format: ${url}`);
+      }
+    } else {
+      // Direct file path - join with base directory
+      localPath = path.join("/var/lib/telegram-bot-api", url);
     }
+
+    // Clean up any double slashes or incorrect path constructions
+    localPath = path.normalize(localPath);
+
+    this.logger.log(`Attempting to access local file: ${localPath}`);
 
     const extension = path.extname(localPath);
     const tempFile = await tmp.file({ postfix: extension });
 
     try {
-      await fsp.access(localPath);
+      // Check if file exists and is accessible
+      await fsp.access(localPath, fs.constants.R_OK);
+
       this.logger.log(`Copying file: ${localPath} to ${tempFile.path}`);
       await fsp.copyFile(localPath, tempFile.path);
       this.logger.log(`File copied successfully: ${tempFile.path}`);
+
+      return {
+        path: tempFile.path,
+        cleanup: tempFile.cleanup,
+      };
     } catch (accessError) {
       await tempFile.cleanup();
-      throw new Error(`Local file not found: ${localPath}`);
-    }
+      this.logger.error(
+        `Failed to access local file: ${localPath}`,
+        accessError
+      );
 
-    return {
-      path: tempFile.path,
-      cleanup: tempFile.cleanup,
-    };
+      // Try to list directory contents for debugging
+      try {
+        const dir = path.dirname(localPath);
+        const files = await fsp.readdir(dir);
+        this.logger.log(`Directory contents of ${dir}:`, files);
+      } catch (dirError) {
+        this.logger.error(
+          `Cannot read directory ${path.dirname(localPath)}:`,
+          dirError
+        );
+      }
+
+      throw new Error(`Local file not found or not accessible: ${localPath}`);
+    }
   }
 
   private async handleRemoteFile(url: string): Promise<DownloadResult> {
