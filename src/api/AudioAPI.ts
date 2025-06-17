@@ -2,6 +2,7 @@ import { AudioBotService } from "../services/AudioBotService";
 import { FileDownloadService } from "../services/FileDownloadService";
 import { AudioMergeService } from "../services/AudioMergeService";
 import { SessionManager } from "../services/SessionManager";
+import { FileOptions } from "../types";
 
 export class AudioAPI {
   private fileDownloadService: FileDownloadService;
@@ -15,11 +16,14 @@ export class AudioAPI {
   }
 
   // API methods for your future backend
-  async mergeAudioFiles(filePaths: string[]): Promise<string> {
+  async mergeAudioFiles(filePaths: string[]): Promise<FileOptions> {
     return this.audioMergeService.mergeAudios(filePaths);
   }
 
-  async downloadAndMerge(fileUrls: string[], userId: number): Promise<string> {
+  async downloadAndMerge(
+    fileUrls: string[],
+    userId: number
+  ): Promise<FileOptions> {
     const downloads = await Promise.all(
       fileUrls.map((url) => this.fileDownloadService.downloadFile(url, userId))
     );
