@@ -40,7 +40,12 @@ export class FileDownloadService {
     let localPath: string;
 
     if (url.startsWith("file://")) {
-      localPath = url.replace("file://", "");
+      localPath = url.replace("file://", ""); // Remove file:// and any telegram-bot-api/ prefix
+      let pathPart = url.replace("file://", "");
+      if (pathPart.startsWith("telegram-bot-api/")) {
+        pathPart = pathPart.substring("telegram-bot-api/".length);
+      }
+      localPath = path.join("/var/lib/telegram-bot-api", pathPart);
     } else if (url.startsWith("http")) {
       // Extract file path from local API URL
       const urlParts = url.split("/file/");

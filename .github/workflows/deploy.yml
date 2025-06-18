@@ -151,6 +151,10 @@ jobs:
             
             # Stop existing services
             $DOCKER_COMPOSE_CMD down || true
+
+            # Build the audio-merger-bot image with --no-cache to ensure latest files
+            echo "Rebuilding audio-merger-bot image..."
+            $DOCKER_COMPOSE_CMD build --no-cache audio-merger-bot
             
             # Start Telegram Bot API service first
             echo "Starting Telegram Bot API service..."

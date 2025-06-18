@@ -70,7 +70,7 @@ Send up to 20 audio files or YouTube URLs before /merge.`
       }
       const status = this.sessionManager.getMixedQueueStatus(userId);
       await ctx.reply(
-        `🎧 Added ${added} YouTube link(s). Queue: ${status.count}/20.`
+        `🎧 Added ${added} YouTube link(s). Queue: ${status.count}/20. Send more or /merge.`
       );
     });
 
