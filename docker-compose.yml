@@ -13,7 +13,7 @@ services:
       TELEGRAM_HTTP_PORT: 8081
       TELEGRAM_MAX_FILESIZE: 2000000000
     volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
     ports:
       - "8081:8081"
       - "8082:8082"
@@ -43,7 +43,7 @@ services:
       CLEANUP_DIRECTORY: /var/lib/telegram-bot-api
       NODE_ENV: production
     volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api # Share the same volume
+      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
 
 volumes:
   telegram-bot-api-data: # Define the named volume
