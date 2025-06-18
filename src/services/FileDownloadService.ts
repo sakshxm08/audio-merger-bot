@@ -40,47 +40,35 @@ export class FileDownloadService {
     let localPath: string;
 
     if (url.startsWith("file://")) {
-      localPath = url.replace("file://", "");
-      if (localPath.startsWith("telegram-bot-api/")) {
-        localPath = localPath.substring("telegram-bot-api/".length);
-      }
+      const fileUrl = new URL(url);
+
+      localPath = decodeURIComponent(fileUrl.pathname);
+
+      this.logger.log(
+        `[handleLocalFile] Parsed local path from file://: ${localPath}`
+      );
     } else if (url.startsWith("http")) {
-      // Extract file path from local API URL
       const urlParts = url.split("/file/");
       if (urlParts.length > 1) {
         const filePathPart = urlParts[1];
-        this.logger.log(`File path part extracted: ${filePathPart}`);
+        this.logger.log(`File path part extracted from URL: ${filePathPart}`);
 
-        // Remove bot token prefix: bot<token>/<actual_path> -> <actual_path>
         const pathAfterToken = filePathPart.substring(
           filePathPart.indexOf("/") + 1
         );
-        this.logger.log(`Path after token: ${pathAfterToken}`);
+        this.logger.log(`Path after token stripped: ${pathAfterToken}`);
 
         localPath = path.join("/var/lib/telegram-bot-api", pathAfterToken);
       } else {
         throw new Error(`Invalid local API URL format: ${url}`);
       }
     } else {
-      // Direct file path - this is likely where the issue is
-      this.logger.log(`Direct file path detected: ${url}`);
+      this.logger.log(`Assuming direct file path: ${url}`);
 
-      // Remove any 'telegram-bot-api/' prefix if it exists
-      let cleanUrl = url;
-      if (cleanUrl.startsWith("telegram-bot-api/")) {
-        cleanUrl = cleanUrl.replace("telegram-bot-api/", "");
-        this.logger.log(`Cleaned URL after removing prefix: ${cleanUrl}`);
-      }
-
-      // Also handle if it starts with '/telegram-bot-api/'
-      if (cleanUrl.startsWith("/telegram-bot-api/")) {
-        cleanUrl = cleanUrl.replace("/telegram-bot-api/", "");
-        this.logger.log(
-          `Cleaned URL after removing /telegram-bot-api/ prefix: ${cleanUrl}`
-        );
-      }
-
-      localPath = path.join("/var/lib/telegram-bot-api", cleanUrl);
+      // Normalize the path to avoid issues with relative/absolute confusion
+      localPath = path.normalize(
+        url.startsWith("/") ? url : path.join("/var/lib/telegram-bot-api", url)
+      );
     }
 
     // Clean up any double slashes or incorrect path constructions

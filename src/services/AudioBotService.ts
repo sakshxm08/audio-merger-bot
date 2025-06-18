@@ -147,6 +147,9 @@ Send up to 20 audio files or YouTube URLs before /merge.`
           const link = await this.bot.telegram.getFileLink(it.content);
           console.log("it -> ", it);
           console.log("link -> ", link);
+          console.log("== Raw URL from getFileLink ==", link.href);
+          console.log("== Hostname =", new URL(link.href).hostname);
+          console.log("== Pathname =", new URL(link.href).pathname);
           const downloadedFile = await this.fileDownload.downloadFile(
             link.href,
             userId
