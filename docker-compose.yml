@@ -18,7 +18,11 @@ services:
       - "8081:8081"
       - "8082:8082"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8081 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8081/bot${TELEGRAM_TOKEN}/getMe || exit 1",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
