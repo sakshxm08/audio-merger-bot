@@ -80,7 +80,7 @@ export class SessionManager {
       session = this.createSession(userId);
     }
 
-    if (session.audioFiles.length >= 10) {
+    if (session.audioFiles.length >= 20) {
       return false;
     }
 
@@ -96,7 +96,7 @@ export class SessionManager {
       session = this.createSession(userId);
     }
 
-    if (session.mixedQueue.length >= 10) {
+    if (session.mixedQueue.length >= 20) {
       return false;
     }
 
